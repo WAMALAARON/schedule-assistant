@@ -6,7 +6,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
+from google.auth.transport.requests import Request as GoogleRequest
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
 from google import genai
@@ -25,9 +25,6 @@ app = FastAPI(title="Schedule Assistant API", version="0.1.0")
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 CLIENT_SECRETS_FILE = "credentials.json"
 REDIRECT_URI = "http://localhost:8000/callback"
-
-# In-memory storage for session credentials during testing
-user_credentials = {}
 
 # --- Pydantic Models for AI Parser ---
 class NLPRequest(BaseModel):
@@ -79,13 +76,9 @@ def callback(
     flow.fetch_token(code=code)
     credentials = flow.credentials
 
-    # Store credentials in memory
-    user_credentials["token"] = credentials.token
-    user_credentials["refresh_token"] = credentials.refresh_token
-    user_credentials["token_uri"] = credentials.token_uri
-    user_credentials["client_id"] = credentials.client_id
-    user_credentials["client_secret"] = credentials.client_secret
-    user_credentials["scopes"] = credentials.scopes
+    # Save credentials locally
+    with open("token.json", "w") as token:
+        token.write(credentials.to_json())
 
     response = Response(content=json.dumps({
         "message": "Authentication successful!",
@@ -97,20 +90,19 @@ def callback(
     return response
 
 def get_calendar_service():
-    if not user_credentials.get("token"):
-        raise HTTPException(
-            status_code=401, 
-            detail="User not authenticated. Please visit http://localhost:8000/login first."
-        )
-    
-    creds = Credentials(
-        token=user_credentials.get("token"),
-        refresh_token=user_credentials.get("refresh_token"),
-        token_uri=user_credentials.get("token_uri"),
-        client_id=user_credentials.get("client_id"),
-        client_secret=user_credentials.get("client_secret"),
-        scopes=user_credentials.get("scopes")
-    )
+    creds = None
+    if os.path.exists('token.json'):
+        creds = Credentials.from_authorized_user_file('token.json', SCOPES)
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(GoogleRequest())
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+        else:
+            raise HTTPException(
+                status_code=401,
+                detail="User not authenticated. Please visit http://localhost:8000/login first."
+            )
     return build("calendar", "v3", credentials=creds)
 
 @app.get("/events")
